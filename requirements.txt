@@ -1,0 +1,11 @@
+﻿zai-sdk==0.2.3
+python-dotenv==1.2.1
+langchain-community==0.4.1
+langchain-text-splitters==1.1.1
+pymilvus==2.6.12
+unstructured==0.20.6
+pypdf==6.10.2
+fastapi==0.162.0
+uvicorn==0.54.0
+python-multipart==0.0.33
+pydantic==2.12.5
