@@ -5,6 +5,7 @@ import type { TraceStep } from '../types/rag'
 defineProps<{
   steps: TraceStep[]
   isLoading: boolean
+  isDemo: boolean
 }>()
 
 const expanded = ref<Record<string, boolean>>({})
@@ -14,6 +15,7 @@ const statusText: Record<TraceStep['status'], string> = {
   running: '执行中',
   success: '完成',
   error: '失败',
+  cancelled: '已停止',
 }
 
 function toggle(id: string): void {
@@ -25,8 +27,8 @@ function toggle(id: string): void {
   <section class="panel">
     <header class="panel__header">
       <div>
-        <h2>Agent 执行过程</h2>
-        <p>任务分解、工具调用与执行状态</p>
+        <h2>Agent 执行过程{{ isDemo ? ' · 演示' : '' }}</h2>
+        <p>{{ isDemo ? '以下为演示轨迹' : '根据服务端事件更新的执行状态' }}</p>
       </div>
       <span class="panel__count">{{ steps.filter((s) => s.status === 'success').length }}/{{ steps.length }}</span>
     </header>
@@ -37,7 +39,7 @@ function toggle(id: string): void {
         <li v-for="step in steps" :key="step.id" class="trace__item" :class="`trace__item--${step.status}`">
           <span class="trace__node">
             <span v-if="step.status === 'success'" class="trace__check">✓</span>
-            <span v-else-if="step.status === 'error'" class="trace__cross">!</span>
+            <span v-else-if="step.status === 'error' || step.status === 'cancelled'" class="trace__cross">!</span>
             <span v-else-if="step.status === 'running'" class="trace__spin" />
             <span v-else class="trace__dot" />
           </span>
@@ -50,7 +52,7 @@ function toggle(id: string): void {
             <p class="trace__detail">{{ step.detail }}</p>
             <template v-if="step.payload">
               <button class="trace__toggle" type="button" @click="toggle(step.id)">
-                {{ expanded[step.id] ? '隐藏调用参数' : '查看调用参数' }}
+                {{ expanded[step.id] ? '隐藏详情' : '查看详情' }}
               </button>
               <pre v-if="expanded[step.id]" class="trace__payload">{{ step.payload }}</pre>
             </template>

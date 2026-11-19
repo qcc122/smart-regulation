@@ -26,7 +26,7 @@ function toggle(index: number): void {
     </header>
 
     <div class="panel__body">
-      <div v-if="isLoading" class="panel__loading">正在检索知识库…</div>
+      <div v-if="isLoading && sources.length === 0" class="panel__loading">正在检索知识库…</div>
       <div v-else-if="sources.length === 0" class="panel__empty">
         发起一次提问后，这里会展示命中的法规片段
       </div>
@@ -35,11 +35,18 @@ function toggle(index: number): void {
         <article v-for="(source, index) in sources" :key="`${source.doc_id}-${index}`" class="source-card">
           <header class="source-card__head">
             <span class="source-card__rank">#{{ index + 1 }}</span>
-            <span class="source-card__doc">{{ source.doc_id }}</span>
+            <span class="source-card__doc">{{ source.title || source.source_file || source.doc_id }}</span>
             <span class="tag">引用片段</span>
           </header>
+          <p class="source-card__text">
+            {{ source.source_file || source.doc_id }}
+            · {{ source.page == null ? '页码未知' : `第 ${source.page} 页` }}
+            <template v-if="source.section_path?.length"> · {{ source.section_path.join(' / ') }}</template>
+            <template v-if="source.chapter"> · {{ source.chapter }}</template>
+            <template v-if="source.article_no"> · {{ source.article_no }}</template>
+          </p>
           <p class="source-card__text" :class="{ 'source-card__text--clamp': !expanded[index] }">{{ source.content }}</p>
-          <button class="source-card__toggle" type="button" @click="toggle(index)">
+          <button class="source-card__toggle" type="button" :aria-expanded="!!expanded[index]" @click="toggle(index)">
             {{ expanded[index] ? '收起' : '展开全文' }}
           </button>
         </article>

@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError, streamChat } from '../api/rag'
 import { createId, useSessions } from '../composables/use-sessions'
 import { useAppState } from '../composables/use-app-state'
 import { useTypewriter } from '../composables/use-typewriter'
-import { TRACE_PHASES, cloneTrace, createTrace, updateStep } from '../composables/use-agent-trace'
-import type { SourceItem, TraceStep } from '../types/rag'
+import { TRACE_PHASES, cloneTrace, createTrace, finishTrace, recordTraceEvent, updateStep } from '../composables/use-agent-trace'
+import { useToast } from '../composables/use-toast'
+import type { SessionItem, SourceItem, TraceStep } from '../types/rag'
 import AgentTracePanel from '../components/AgentTracePanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import KnowledgePanel from '../components/KnowledgePanel.vue'
@@ -16,8 +17,9 @@ import ConfirmDialog from '../components/common/ConfirmDialog.vue'
 type PanelKey = 'chat' | 'retrieval' | 'trace' | 'sessions'
 
 const app = useAppState()
-const { sessions, activeId, activeSession, createSession, selectSession, removeSession, ensureSession, appendMessage, updateMessage } = useSessions()
 const { health, documents, isUploading, isDemo, topK, currentSources, currentTrace, streamingId, streamPaused } = app
+const { sessions, activeId, activeSession, refreshSessions, createSession, selectSession, removeSession, ensureSession, appendMessage, updateMessage } = useSessions(isDemo)
+const { notify } = useToast()
 
 const isLoading = ref(false)
 const activePanel = ref<PanelKey>('chat')
@@ -29,6 +31,17 @@ const messages = computed(() => activeSession.value?.messages ?? [])
 
 function phaseStatus(id: string): TraceStep['status'] {
   if (currentTrace.value.length === 0) return 'pending'
+  if (!isDemo.value) {
+    const steps = currentTrace.value
+    const matches = steps.filter((step) => {
+      if (id === 'intent') return step.title === '意图识别'
+      if (id === 'decision') return step.kind === 'decision' && step.title !== '意图识别'
+      if (id === 'retrieval') return step.kind === 'tool'
+      if (id === 'context') return step.kind === 'context'
+      return step.kind === 'generation'
+    })
+    return matches.at(-1)?.status ?? 'pending'
+  }
   const statuses = new Map(currentTrace.value.map((step) => [step.id, step.status]))
   if (id === 'retrieval' && statuses.get('retrieval') !== 'success') {
     return statuses.get('tool') ?? 'pending'
@@ -36,12 +49,17 @@ function phaseStatus(id: string): TraceStep['status'] {
   return statuses.get(id) ?? 'pending'
 }
 
-function handleCreateSession(): void {
-  createSession()
-  currentSources.value = []
-  currentTrace.value = []
-  activePanel.value = 'chat'
-  sidebarOpen.value = false
+async function handleCreateSession(): Promise<void> {
+  if (isLoading.value) return
+  try {
+    await createSession()
+    currentSources.value = []
+    currentTrace.value = []
+    activePanel.value = 'chat'
+    sidebarOpen.value = false
+  } catch (error) {
+    notify(`新建会话失败：${errorMessage(error)}`, 'error')
+  }
 }
 
 // 将当前会话最后一条回答的引用与轨迹同步到右侧面板
@@ -51,14 +69,20 @@ function syncPanelsFromSession(): void {
   currentTrace.value = lastAnswer?.trace ? cloneTrace(lastAnswer.trace) : []
 }
 
-function handleSelectSession(id: string): void {
-  selectSession(id)
-  syncPanelsFromSession()
-  activePanel.value = 'chat'
-  sidebarOpen.value = false
+async function handleSelectSession(id: string): Promise<void> {
+  if (isLoading.value) return
+  try {
+    await selectSession(id)
+    syncPanelsFromSession()
+    activePanel.value = 'chat'
+    sidebarOpen.value = false
+  } catch (error) {
+    notify(`读取会话失败：${errorMessage(error)}`, 'error')
+  }
 }
 
 function requestRemoveSession(id: string): void {
+  if (isLoading.value) return
   confirmSessionId.value = id
 }
 
@@ -66,14 +90,18 @@ function requestRemoveDocument(docId: string): void {
   confirmDocId.value = docId
 }
 
-function confirmRemove(): void {
+async function confirmRemove(): Promise<void> {
   const sessionId = confirmSessionId.value
   const docId = confirmDocId.value
   confirmSessionId.value = ''
   confirmDocId.value = ''
   if (sessionId) {
-    removeSession(sessionId)
-    syncPanelsFromSession()
+    try {
+      await removeSession(sessionId)
+      syncPanelsFromSession()
+    } catch (error) {
+      notify(`删除会话失败：${errorMessage(error)}`, 'error')
+    }
   }
   if (docId) void app.handleRemoveDocument(docId)
 }
@@ -100,18 +128,23 @@ function demoAnswer(question: string): { answer: string; sources: SourceItem[] }
 }
 async function handleSend(question: string): Promise<void> {
   if (isLoading.value) return
-  const session = ensureSession()
+  isLoading.value = true
+  let session: SessionItem
+  try {
+    session = await ensureSession()
+  } catch (error) {
+    isLoading.value = false
+    notify(`创建会话失败：${errorMessage(error)}`, 'error')
+    return
+  }
   activePanel.value = 'chat'
   appendMessage(session.id, { id: createId(), role: 'user', content: question, createdAt: Date.now() })
 
-  const trace = createTrace(question, topK.value)
-  currentTrace.value = trace
+  currentTrace.value = isDemo.value ? createTrace(question, topK.value) : []
+  const trace = currentTrace.value
+  const taskStarts = new Map<string, number>()
   currentSources.value = []
-  isLoading.value = true
   const startedAt = performance.now()
-  updateStep(trace, 'intent', { status: 'success', detail: `提取检索意图：${question.slice(0, 24)}`, durationMs: 0 })
-  updateStep(trace, 'decision', { status: 'success', detail: '决策：调用 vector_search 检索知识库，再由 LLM 依据引用生成' })
-  updateStep(trace, 'tool', { status: 'running' })
 
   const assistantId = createId()
   appendMessage(session.id, {
@@ -126,8 +159,11 @@ async function handleSend(question: string): Promise<void> {
   streamingId.value = assistantId
   streamPaused.value = false
 
+  let resolveRendered!: () => void
+  const rendered = new Promise<void>((resolve) => { resolveRendered = resolve })
   const tw = useTypewriter({
     onUpdate: (text) => updateMessage(session.id, assistantId, { content: text }),
+    onFinish: () => resolveRendered(),
   })
   const controller = new AbortController()
   app.bindStream(tw, controller)
@@ -137,11 +173,15 @@ async function handleSend(question: string): Promise<void> {
     if (finalized) return
     finalized = true
     const elapsed = Math.round(performance.now() - startedAt)
-    updateStep(trace, 'generation', {
-      status: 'success',
-      detail: opts.aborted ? '已停止生成' : '已基于参考资料生成回答',
-      durationMs: elapsed,
-    })
+    if (isDemo.value) {
+      updateStep(trace, 'generation', {
+        status: opts.aborted ? 'cancelled' : 'success',
+        detail: opts.aborted ? '已停止生成' : '已基于参考资料生成回答',
+        durationMs: elapsed,
+      })
+    } else if (opts.aborted) {
+      finishTrace(trace, 'cancelled', '用户停止生成')
+    }
     updateMessage(session.id, assistantId, {
       isStreaming: false,
       sources: opts.sources ?? currentSources.value,
@@ -151,6 +191,9 @@ async function handleSend(question: string): Promise<void> {
 
   try {
     if (isDemo.value) {
+      updateStep(trace, 'intent', { status: 'success', detail: `演示意图：${question.slice(0, 24)}`, durationMs: 0 })
+      updateStep(trace, 'decision', { status: 'success', detail: '演示流程：检索样例片段并生成回答' })
+      updateStep(trace, 'tool', { status: 'running' })
       await delay(350)
       const demo = demoAnswer(question)
       currentSources.value = demo.sources
@@ -170,26 +213,22 @@ async function handleSend(question: string): Promise<void> {
       } else {
         tw.setFullAnswer(demo.answer)
         tw.markDone()
-        finalize({ sources: demo.sources })
+        await rendered
+        finalize({ sources: demo.sources, aborted: controller.signal.aborted })
       }
     } else {
       await streamChat(
         { question, session_id: session.id, top_k: topK.value },
         (event) => {
+          recordTraceEvent(trace, event, taskStarts, performance.now())
           if (event.type === 'sources') {
             currentSources.value = event.sources
-            const elapsed = Math.round(performance.now() - startedAt)
-            updateStep(trace, 'tool', { status: 'success', detail: `调用完成，返回 ${event.sources.length} 个片段`, durationMs: elapsed })
-            updateStep(trace, 'retrieval', { status: 'success', detail: `向量检索命中 ${event.sources.length} 个法规片段` })
-            updateStep(trace, 'context', { status: 'success', detail: '已将片段拼接进生成 Prompt' })
-            updateStep(trace, 'generation', { status: 'running' })
           } else if (event.type === 'delta') {
             tw.push(event.content)
           } else if (event.type === 'done') {
             tw.setFullAnswer(event.answer)
             tw.markDone()
             currentSources.value = event.sources
-            finalize({ sources: event.sources })
           } else if (event.type === 'error') {
             throw new ApiError(event.message, 0)
           }
@@ -199,6 +238,11 @@ async function handleSend(question: string): Promise<void> {
       if (controller.signal.aborted) {
         tw.stop()
         finalize({ aborted: true })
+      } else {
+        // 网络终帧不等于页面动画结束，等待显示完成后再清理定时器。
+        await rendered
+        finalize({ sources: currentSources.value, aborted: controller.signal.aborted })
+        void refreshSessions().catch((error: unknown) => notify(`刷新会话失败：${errorMessage(error)}`, 'error'))
       }
     }
   } catch (error) {
@@ -206,11 +250,14 @@ async function handleSend(question: string): Promise<void> {
       tw.stop()
       finalize({ aborted: true })
     } else {
+      tw.dispose()
       const detail = error instanceof ApiError ? error.message : errorMessage(error)
-      updateStep(trace, 'tool', { status: 'error', detail })
-      updateStep(trace, 'retrieval', { status: 'error', detail: '检索未完成' })
-      updateStep(trace, 'context', { status: 'error', detail: '上下文未构建' })
-      updateStep(trace, 'generation', { status: 'error', detail: '未生成回答' })
+      if (isDemo.value) {
+        updateStep(trace, 'tool', { status: 'error', detail })
+        updateStep(trace, 'generation', { status: 'error', detail })
+      } else {
+        finishTrace(trace, 'error', detail)
+      }
       updateMessage(session.id, assistantId, {
         isStreaming: false,
         isError: true,
@@ -224,6 +271,16 @@ async function handleSend(question: string): Promise<void> {
   }
 }
 
+function handleSkip(): void {
+  app.skipStream()
+  if (isLoading.value && !isDemo.value && !currentTrace.value.some((step) => step.id === 'display-skip')) {
+    currentTrace.value.push({
+      id: 'display-skip', title: '跳过显示动画', kind: 'control', status: 'success',
+      detail: '仅跳过页面动画，服务端仍继续生成回答',
+    })
+  }
+}
+
 function selectPanel(panel: PanelKey): void {
   if (panel === 'sessions') {
     sidebarOpen.value = true
@@ -234,6 +291,19 @@ function selectPanel(panel: PanelKey): void {
 
 onMounted(() => {
   if (messages.value.length > 0) syncPanelsFromSession()
+  void refreshSessions().then(syncPanelsFromSession).catch((error: unknown) => {
+    notify(`加载会话失败：${errorMessage(error)}`, 'error')
+  })
+})
+
+watch(isDemo, (enabled) => {
+  if (enabled) {
+    syncPanelsFromSession()
+  } else {
+    void refreshSessions().then(syncPanelsFromSession).catch((error: unknown) => {
+      notify(`加载会话失败：${errorMessage(error)}`, 'error')
+    })
+  }
 })
 </script>
 
@@ -285,7 +355,7 @@ onMounted(() => {
             @update:top-k="topK = $event"
             @pause="app.pauseStream"
             @resume="app.resumeStream"
-            @skip="app.skipStream"
+            @skip="handleSkip"
             @stop="app.stopStream"
           />
         </div>
@@ -294,7 +364,7 @@ onMounted(() => {
             <RetrievalPanel :sources="currentSources" :is-loading="isLoading" :is-demo="isDemo" />
           </div>
           <div class="rail__slot" :class="{ 'mobile-active': activePanel === 'trace' }">
-            <AgentTracePanel :steps="currentTrace" :is-loading="isLoading" />
+            <AgentTracePanel :steps="currentTrace" :is-loading="isLoading" :is-demo="isDemo" />
           </div>
         </div>
       </main>

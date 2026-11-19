@@ -126,6 +126,7 @@ export function useTypewriter(options: TypewriterOptions) {
     if (authoritative) displayed = authoritative
     state.value = 'done'
     notify()
+    if (upstreamDone) finish()
   }
 
   function stop(): void {
@@ -134,6 +135,8 @@ export function useTypewriter(options: TypewriterOptions) {
   }
 
   function dispose(): void {
+    // SSE 终帧可能紧跟首个正文片段到达；清理前补齐尚未显示的权威答案。
+    if (upstreamDone && !finished) finish()
     clearTimer()
   }
 

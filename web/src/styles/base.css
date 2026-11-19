@@ -225,6 +225,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; 
 .flow__node--success .flow__index { background: var(--success); color: #fff; }
 .flow__node--error { color: #b42318; background: var(--danger-soft); border-color: var(--danger-line); }
 .flow__node--error .flow__index { background: var(--danger); color: #fff; }
+.flow__node--cancelled { color: var(--muted); background: var(--surface-2); }
 @keyframes flow-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.28); }
   50% { box-shadow: 0 0 0 6px rgba(99, 102, 241, 0); }
@@ -567,6 +568,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; 
 .trace__item--success .trace__node { background: var(--success-soft); border-color: var(--success-line); color: var(--success); }
 .trace__item--running .trace__node { background: var(--brand-soft); border-color: var(--brand-line); animation: flow-pulse 1.6s ease-in-out infinite; }
 .trace__item--error .trace__node { background: var(--danger-soft); border-color: var(--danger-line); color: var(--danger); }
+.trace__item--cancelled .trace__node { background: var(--surface-2); color: var(--muted); }
 .trace__check, .trace__cross { font-weight: 800; }
 .trace__spin { width: 9px; height: 9px; border: 2px solid var(--brand); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
 .trace__dot { width: 5px; height: 5px; border-radius: 50%; background: #cbd5e1; }
@@ -576,6 +578,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; 
 .trace__status { font-size: 10px; font-weight: 600; color: var(--muted); }
 .trace__item--success .trace__status { color: var(--success); }
 .trace__item--error .trace__status { color: var(--danger); }
+.trace__item--cancelled .trace__status { color: var(--muted); }
 .trace__time { margin-left: auto; font-size: 10px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; }
 .trace__detail { font-size: 11px; color: var(--ink-soft); line-height: 1.65; margin: 4px 0 0; word-break: break-word; }
 .trace__payload {

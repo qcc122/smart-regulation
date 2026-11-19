@@ -3,6 +3,8 @@ import type {
   ChatRequest,
   ChatResponse,
   DocumentItem,
+  SessionHistory,
+  SessionSummary,
   StreamEvent,
   UploadResult,
 } from '../types/rag'
@@ -24,6 +26,7 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 1500
     response = await fetch(`${API_BASE}${path}`, { ...init, signal: init.signal ?? timeoutCtrl.signal })
   } catch (error) {
     if (init.signal?.aborted) throw error
+    if (timeoutCtrl.signal.aborted) throw new ApiError('请求超时，请稍后刷新检查处理结果', 408)
     throw new ApiError('网络异常或服务不可用，请稍后重试', 0)
   } finally {
     clearTimeout(timer)
@@ -64,30 +67,38 @@ export async function streamChat(
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
 
+  let terminal = false
   const consume = (raw: string): void => {
     const line = raw.split('\n').find((item) => item.startsWith('data:'))
     if (!line) return
     const text = line.slice(5).trim()
     if (!text || text === '[DONE]') return
+    let event: StreamEvent
     try {
-      onEvent(JSON.parse(text) as StreamEvent)
+      event = JSON.parse(text) as StreamEvent
     } catch {
-      // 单个损坏帧跳过，后续帧继续处理，不中断整条流
+      throw new ApiError('流式响应格式错误', 0)
     }
+    if (!event || !['node', 'tool', 'sources', 'delta', 'done', 'error'].includes(event.type)) return
+    onEvent(event)
+    if (event.type === 'done' || event.type === 'error') terminal = true
+    if (event.type === 'error') throw new ApiError(event.message, 0)
   }
 
   try {
     while (true) {
       const { value, done } = await reader.read()
       if (done) break
-      buffer += decoder.decode(value, { stream: true })
+      buffer = (buffer + decoder.decode(value, { stream: true })).replaceAll('\r\n', '\n')
       const frames = buffer.split('\n\n')
       buffer = frames.pop() ?? ''
       frames.forEach(consume)
     }
     buffer += decoder.decode()
     if (buffer.trim()) consume(buffer)
+    if (!signal?.aborted && !terminal) throw new ApiError('连接中断，回答未完成', 0)
   } finally {
+    if (!terminal) await reader.cancel().catch(() => undefined)
     reader.releaseLock()
   }
 }
@@ -98,7 +109,7 @@ export const ragApi = {
   uploadDocument: (file: File): Promise<UploadResult> => {
     const body = new FormData()
     body.append('file', file)
-    return request<UploadResult>('/documents/upload', { method: 'POST', body }, 60000)
+    return request<UploadResult>('/documents/upload', { method: 'POST', body }, 600000)
   },
   deleteDocument: (docId: string): Promise<null> =>
     request<null>(`/documents/${encodeURIComponent(docId)}`, { method: 'DELETE' }),
@@ -112,4 +123,10 @@ export const ragApi = {
       },
       60000,
     ),
+  listSessions: (): Promise<SessionSummary[]> => request<SessionSummary[]>('/sessions'),
+  createSession: (): Promise<SessionSummary> => request<SessionSummary>('/sessions', { method: 'POST' }),
+  getSession: (id: string): Promise<SessionHistory> =>
+    request<SessionHistory>(`/sessions/${encodeURIComponent(id)}`),
+  deleteSession: (id: string): Promise<null> =>
+    request<null>(`/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }

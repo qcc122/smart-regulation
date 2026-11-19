@@ -13,6 +13,15 @@ export interface ChatRequest {
 export interface SourceItem {
   doc_id: string
   content: string
+  citation_id?: string
+  parent_id?: string
+  title?: string
+  source_file?: string
+  page?: number | null
+  section_path?: string[]
+  chapter?: string | null
+  article_no?: string | null
+  retrieval_score?: number | null
 }
 
 export interface ChatResponse {
@@ -22,6 +31,7 @@ export interface ChatResponse {
 }
 
 export type StreamEvent =
+  | { type: 'node' | 'tool'; id: string; name: string; status: 'running' | 'success' | 'error' }
   | { type: 'sources'; sources: SourceItem[] }
   | { type: 'delta'; content: string }
   | { type: 'done'; session_id: string; answer: string; sources: SourceItem[] }
@@ -38,9 +48,9 @@ export interface UploadResult {
   chunk_count: number
 }
 
-export type TraceStatus = 'pending' | 'running' | 'success' | 'error'
+export type TraceStatus = 'pending' | 'running' | 'success' | 'error' | 'cancelled'
 
-export type TraceKind = 'decision' | 'tool' | 'retrieval' | 'context' | 'generation'
+export type TraceKind = 'decision' | 'tool' | 'retrieval' | 'context' | 'generation' | 'control'
 
 export interface TraceStep {
   id: string
@@ -70,4 +80,10 @@ export interface SessionItem {
   createdAt: number
   updatedAt: number
   messages: ChatMessage[]
+}
+
+export type SessionSummary = Omit<SessionItem, 'messages'>
+
+export interface SessionHistory extends SessionSummary {
+  messages: Pick<ChatMessage, 'id' | 'role' | 'content' | 'sources'>[]
 }
