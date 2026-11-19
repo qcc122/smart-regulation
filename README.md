@@ -1,108 +1,141 @@
-# 住建法规智能助手（RAG 知识库问答系统）
+# 住建法规智能助手
 
-基于 RAG 的住建行业法规智能问答系统：上传法规文档（PDF/DOCX），自动解析、切分并向量化入库；提问时由 Milvus 向量检索召回相关法规片段，交由大模型生成**带引用来源**的回答；前端可视化引用与执行轨迹，支持 SSE 流式逐字输出。
+基于 **FastAPI + LangChain / LangGraph + Vue 3** 的法规知识库问答项目。支持 PDF / DOCX 入库、父子块检索、Milvus 服务端模型重排、流式回答、引用原文和 PostgreSQL 持久化会话；通过 Docker Compose 与 Nginx 部署到 Linux。
 
-后端（FastAPI）独立开发，前端基于 CodeBuddy AI 编程助手辅助生成——仓库内包含完整的需求拆解、验收测试与工程化实践记录。
+[观看演示视频](./docs/demo.mp4) · [Linux 部署](docs/linux-deploy.md) · [文档初始化](docs/data-pipeline.md) · [SSE 协议](docs/sse-events.md)
 
-## 演示视频
+## 演示
 
-| 桌面端完整流程（56s） | 移动端适配（12s） |
-| :---: | :---: |
-| [![桌面端演示](docs/cover-desktop.png)](docs/demo-desktop.mp4) | [![移动端演示](docs/cover-mobile.png)](docs/demo-mobile.mp4) |
+[![项目演示预览](docs/demo-preview.jpg)](./docs/demo.mp4)
 
-点击图片播放。桌面端视频包含：流式逐字生成、暂停/继续交互、引用来源展示、Agent 轨迹时间线、知识库上传与删除确认。
+视频长约 2 分 29 秒，展示实际项目操作。若 GitHub 不提供在线播放，可在视频页面点击 **View raw / Download** 下载观看。
 
-## 功能特性
+## 核心功能
 
-- **知识库管理**：PDF / DOCX 上传 → LangChain 切分 → 智谱 Embedding → Milvus 入库，解析失败自动清理临时文件
-- **检索增强问答**：Milvus 向量召回 top-k 片段 → 引用编号拼接 Prompt → GLM 生成回答，前端同步展示引用原文
-- **SSE 流式输出**：逐 token 推送（实测单次回答 300+ 帧）；前端打字机引擎以 Unicode 码点消费，支持暂停/继续/跳过/中断，终帧完整性校验保证零丢字
-- **执行轨迹可视化**：意图识别 → Agent 决策 → 工具调用（参数可展开）→ 片段召回 → 上下文构建 → 答案生成，状态与耗时实时更新
-- **多轮会话**：localStorage 持久化、自动会话标题；后端会话 TTL 过期清理 + 容量上限淘汰
-- **响应式界面**：桌面三栏布局 / 移动端底部标签 + 抽屉侧栏，390px~1440px 实机截图验收
+- **统一文档 pipeline**：上传接口与本地初始化脚本共用 MinerU `extract` → Markdown → 父子块切分 → PostgreSQL / Milvus 入库流程；按文件 SHA-256 跳过重复文档。
+- **父子块检索**：智谱 Embedding 与 Milvus BM25 混合召回子块，在查询中调用 SiliconFlow 模型重排，再按 `parent_id` 去 PostgreSQL 读取并去重父块。
+- **Agent 编排**：父图负责意图识别和回答校验，分别路由到法规问答、聊天子图；检索以 `@tool` 注册，联网请求调用智谱网页搜索 MCP。
+- **真实流式输出**：LangGraph v3 模型文本增量通过 FastAPI `EventSourceResponse` 推送到 Vue；终帧返回校验后的完整回答，前端支持暂停、继续、跳过动画和停止请求。
+- **可追溯回答**：正文包含来源编号，引用卡片展示文件、章节 / 条款、页码信息和可展开的父块原文；无来源时明确说明缺少依据。
+- **持久化会话**：父图与子图共享同一个 `AsyncPostgresSaver`，通过 `thread_id` 隔离会话；提供会话创建、列表、历史和删除接口。
+- **执行轨迹**：前端按服务端任务 ID 配对节点 / 工具事件，显示执行状态及事件接收耗时；真实模式与演示模式分开。
+- **Linux 部署**：Compose 管理 PostgreSQL、etcd、MinIO、Milvus、API、前端构建任务和 Nginx，数据使用命名卷保存。
 
 ## 架构
 
 ```mermaid
-flowchart LR
-    A[用户提问] --> B[FastAPI /api/chat/stream]
-    B --> C[Milvus 向量检索 top-k]
-    C --> D[Prompt 组装：引用编号 + 问题]
-    D --> E[智谱 GLM 流式生成]
-    E -- SSE: sources / delta / done --> F[Vue 3 前端]
-    F --> G[打字机渲染 + 引用面板 + 轨迹时间线]
+flowchart TD
+    User[用户] --> Nginx[Nginx / Vue 3]
+    Nginx --> API[FastAPI]
+    API --> Graph[LangGraph 父图 / 意图识别]
+    Graph -->|法规问题| Agent[法规 Agent / 检索工具]
+    Graph -->|闲聊或联网| Chat[聊天子图 / 网页搜索 MCP]
+    Agent --> Child[Milvus dense + BM25 子块召回]
+    Child --> Rank[查询内 SiliconFlow 模型重排]
+    Rank --> Parent[按 parent_id 查询 PostgreSQL 父块]
+    Parent --> LLM[智谱 GLM 生成回答]
+    Chat --> LLM
+    LLM -->|模型文本增量| SSE[SSE / Vue 流式显示]
+    LLM --> Check[引用校验]
+    Check -->|done 完整答案| SSE
+    Graph <--> Saver[AsyncPostgresSaver / 会话 checkpoint]
 ```
 
 ## 技术栈
 
-| 层 | 技术 |
+| 层次 | 技术 |
 | --- | --- |
-| 后端 | FastAPI、LangChain（Loaders / TextSplitters）、pymilvus、智谱 GLM-4-Flash + Embedding、Docker |
-| 前端 | Vue 3、TypeScript、Vite、vue-router、SSE（fetch stream） |
-| 验收 | pytest TestClient、Puppeteer 无头浏览器端到端测试 |
+| 后端 | Python、FastAPI、SQLAlchemy、LangChain 1.x、LangGraph v3 streaming |
+| 解析与切分 | MinerU Open API、Markdown 标题切分、递归子块切分 |
+| 存储与检索 | PostgreSQL 16、Milvus 2.6.26、LangChain Milvus、BM25、SiliconFlow Rerank |
+| 模型与工具 | 智谱 GLM / Embedding、智谱网页搜索 MCP |
+| 前端 | Vue 3 Composition API、TypeScript、Vite、Vue Router、Fetch SSE |
+| 部署与验证 | Docker Compose、Nginx、unittest / FastAPI TestClient、Node.js 内置测试、vue-tsc |
 
-## 快速开始
+后端使用 `langchain-milvus==0.3.3` 与 `pymilvus==2.6.9` 的兼容组合。Milvus 自动生成 collection 字段，业务层通过 LangChain 接口操作向量库。
 
-**后端**（需要 Milvus 2.x 与智谱 API Key）：
+## 快速部署到 Linux
+
+Linux 宿主机需要 Docker 和 Docker Compose，Python 3.14、Node.js 和 Nginx 由容器提供。
 
 ```bash
-pip install -r requirements.txt
-copy .env.example .env        # 填入 ZHIPU_API_KEY 等
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+git clone https://github.com/qcc122/smart-regulation.git
+cd smart-regulation
+cp .env.example .env
 ```
 
-**前端**：
+编辑 `.env`，填写 `ZHIPU_API_KEY`、`SILICONFLOW_API_KEY`、`MINERU_TOKEN`、`POSTGRES_PASSWORD` 和 `MINIO_ROOT_PASSWORD`。MinIO 密码至少 8 位。模板不包含真实凭据；`.env` 不进入版本控制。
+
+```bash
+docker compose config --quiet
+docker compose up -d
+docker compose ps
+```
+
+浏览器访问 `http://<Linux-IP>:8080`。首次启动会下载镜像、安装后端依赖和构建前端，等待 API、Milvus 等服务就绪。端口需未被旧服务占用。详细配置、数据卷和日志命令见 [Linux 部署文档](docs/linux-deploy.md)。
+
+SiliconFlow 重排运行在 **Milvus 容器**，Compose 将 Key 注入 `MILVUS_SILICONFLOW_API_KEY`。默认可直连外部服务；需要代理时参照 `.env.example` 配置，并保持内部私有网段绕过代理。
+
+## 本地文档初始化
+
+页面可直接上传 PDF / DOCX，单文件上限 20 MiB。也可在容器中批量导入：
+
+```bash
+docker compose exec api mkdir -p /tmp/regulation-seed
+docker cp ./your-documents/. smart-regulation-api-1:/tmp/regulation-seed/
+docker compose exec api python -m scripts.init_documents /tmp/regulation-seed
+```
+
+脚本递归扫描 PDF / DOCX，输出新增、跳过和失败数量。资料目录与 API 密钥由部署者提供，仓库不包含个人上传文件或数据库内容。初始化与数据清理说明见 [文档 pipeline](docs/data-pipeline.md)。
+
+## API
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/api/health` | 数据库连通性健康检查 |
+| GET | `/api/documents` | 已就绪文档列表 |
+| POST | `/api/documents/upload` | 上传并解析入库 |
+| DELETE | `/api/documents/{doc_id}` | 删除文档和向量 |
+| POST | `/api/chat` | 同步问答 |
+| POST | `/api/chat/stream` | 节点、工具、引用、文本增量和终态 SSE |
+| GET / POST | `/api/sessions` | 会话列表 / 创建 |
+| GET / DELETE | `/api/sessions/{session_id}` | 会话历史 / 删除 |
+
+## 目录
+
+```text
+app/
+  main.py                 # FastAPI 生命周期内初始化主图
+  core/                   # 配置、数据库、日志和异常
+  common/                 # 依赖注入、统一响应
+  modules/
+    document/             # MinerU、切分、入库和上传
+    agent/                # 父图、子图、检索工具与向量库
+    chat/                 # router.py / service.py（SSE）
+    conversation/         # PostgreSQL checkpoint 与会话接口
+web/src/                  # Vue 页面、组件与 composables
+scripts/                  # 文档初始化和显式重置脚本
+tests/                    # 后端测试
+web/tests/                # 前端 SSE、会话、轨迹与文字显示测试
+deploy/nginx.conf         # 静态文件、API 反代、SSE 与上传配置
+docker-compose.yml        # 全栈服务与数据卷
+```
+
+## 验证
+
+安装后端依赖后，从项目根目录运行：
+
+```bash
+python -m unittest discover -s tests -q
+```
+
+前端验证：
 
 ```bash
 cd web
-npm install --include=dev
-npm run dev                   # http://localhost:5173
+npm ci
+npm test
+npm run build
 ```
 
-**Docker 部署**（后端）：
-
-```bash
-docker build -t smart-regulation .
-docker run -d -p 8000:8000 --env-file .env smart-regulation
-```
-## API 一览
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| GET | `/api/health` | 健康检查 |
-| GET | `/api/documents` | 知识库文档列表 |
-| POST | `/api/documents/upload` | 上传 PDF/DOCX（≤20MB），解析切分入库 |
-| DELETE | `/api/documents/{doc_id}` | 删除文档及其向量片段 |
-| POST | `/api/chat` | 同步问答 |
-| POST | `/api/chat/stream` | SSE 流式问答（sources → delta* → done） |
-
-## 项目结构
-
-```
-├── app/                    # 后端
-│   ├── main.py             # FastAPI 入口：6 个接口、SSE 流式、异常处理
-│   ├── config.py           # 环境配置（.env 加载）
-│   ├── data_loader.py      # 文档解析、切分、批量向量化
-│   └── retriever.py        # Milvus 建表 / 增 / 删 / 向量检索
-├── web/                    # 前端（Vue 3 + TS + Vite）
-│   └── src/
-│       ├── views/          # ChatView（问答）/ KnowledgeView（知识库）
-│       ├── components/     # 对话、检索、轨迹、侧栏等组件
-│       ├── composables/    # 会话管理、全局状态、打字机引擎、Agent 轨迹
-│       └── api/rag.ts      # 类型化请求层 + SSE 解析
-├── docs/                   # 演示视频与封面图
-├── Dockerfile
-└── requirements.txt
-```
-
-## 已知边界（如实说明）
-
-- Agent 轨迹为前端编排层对真实请求生命周期的记录；后端为线性 RAG 流水线（检索 → 生成），暂无自主工具决策
-- 未接入用户鉴权体系，公网部署前需自行添加访问控制
-- 会话存储于浏览器 localStorage，跨设备不同步
-
-## 质量验证
-
-- `vue-tsc` 类型检查 + Vite 生产构建通过
-- FastAPI TestClient 接口测试：非法 doc_id 拦截（404）、空参数校验（422）
-- Puppeteer 无头浏览器端到端：真实后端联调下验证逐字增长、暂停/继续/停止、跳过动画、刷新后状态恢复、上传校验、删除确认、移动端布局等 10+ 场景
+本地验证包含 66 项后端测试、7 项前端测试，以及 TypeScript 类型检查和生产构建。测试覆盖文档解析、重复导入、入库补偿、父块展开、引用校验、内容块纯文本提取、会话接口、v3 流式事件、异常终态与断流清理。项目已在 Linux 虚拟机完成部署与功能试用；实机操作见演示视频。
